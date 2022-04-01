@@ -22,7 +22,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-#include <deque>
+#include <list>
 #include <netinet/in.h>
 #include <cassert>
 #include <cstdio>
@@ -77,13 +77,20 @@ struct pkt {
 struct VirtualSocket {
 	std::mutex mutex;
 	std::condition_variable cv;
-	bool open = true;
-	uint16_t sport = 0;
-	std::deque<pkt> recvbuf;
-};
+	bool open;
+	uint16_t sport;
+	std::list<pkt> recvbuf;
 
-// TODO: Reuse socket ids to avoid blowing up select
-#define BASE_SOCKET_ID   100
+	VirtualSocket() {
+		reset(false);
+	}
+
+	void reset(bool open_) {
+		open = open_;
+		sport = 0;
+		recvbuf.clear();
+	}
+};
 
 // Protects the maps and id generation
 static std::mutex mutex;
@@ -106,33 +113,53 @@ static uint16_t random_port() {
 	return port;
 }
 
-static VirtualSocket *getvs(int sockfd) {
-	assert(sockfd >= BASE_SOCKET_ID);
-	int id = sockfd - BASE_SOCKET_ID;
-	assert(id < socket_map.size());
-	VirtualSocket* vs = socket_map[id];
+static inline void maybe_init_socket_map() {
+	if (socket_map.size() == 0) {
+		int count = EMSOCKET_MAX_FD - EMSOCKET_BASE_FD;
+		for (int idx = 0; idx < count; idx++) {
+			socket_map.push_back(new VirtualSocket());
+		}
+	}
+}
+
+// Must be called holding the mutex
+static VirtualSocket *getvs(int fd) {
+	assert(fd >= EMSOCKET_BASE_FD && fd < EMSOCKET_MAX_FD);
+	maybe_init_socket_map();
+	int idx = fd - EMSOCKET_BASE_FD;
+	auto vs = socket_map[idx];
 	assert(vs && vs->open);
 	return vs;
 }
 
+/**************************************************************************************************/
+
+#define VLOCK()   const std::lock_guard<std::mutex> lock(mutex)
 
 int emsocket_socket(int domain, int type, int protocol) {
-	const std::lock_guard<std::mutex> lock(mutex);
-	VirtualSocket* vs = new VirtualSocket();
-	int id = socket_map.size();
-	socket_map.push_back(vs);
-	return BASE_SOCKET_ID + id;
+	VLOCK();
+	maybe_init_socket_map();
+	int idx = 0;
+        for (; idx < socket_map.size(); idx++) {
+		if (!socket_map[idx]->open) {
+			break;
+		}
+	}
+	if (idx == socket_map.size()) {
+		errno = EMFILE;
+		return -1;
+	}
+	socket_map[idx]->reset(true);
+	return EMSOCKET_BASE_FD + idx;
 }
 
-int emsocket_setsockopt(int fd, int level, int optname, const void *optval, socklen_t optlen) {
-	return -1;
-}
+int emsocket_socketpair(int domain, int type, int protocol, int fds[2]);
 
-int emsocket_bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
-	const std::lock_guard<std::mutex> lock(mutex);
-	auto vs = getvs(sockfd);
+int emsocket_bind(int fd, const struct sockaddr *addr, socklen_t len) {
+	VLOCK();
+	auto vs = getvs(fd);
 	assert(vs->sport == 0);
-	uint16_t port = get_port(addr, addrlen);
+	uint16_t port = get_port(addr, len);
 	if (port == 0) {
 		port = random_port();
 	}
@@ -145,18 +172,27 @@ int emsocket_bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
 	return 0;
 }
 
-ssize_t emsocket_sendto(int sockfd, const void *buf, size_t len, int flags,
-		const struct sockaddr *dest_addr, socklen_t addrlen) {
-	if (!is_localhost(dest_addr, addrlen)) {
+int emsocket_getsockname(int fd, struct sockaddr *addr, socklen_t *len);
+
+int emsocket_connect(int fd, const struct sockaddr *addr, socklen_t len);
+
+int emsocket_getpeername(int fd, struct sockaddr *addr, socklen_t *len);
+
+ssize_t emsocket_send(int fd, const void *buf, size_t n, int flags);
+
+ssize_t emsocket_recv(int fd, void *buf, size_t n, int flags);
+
+ssize_t emsocket_sendto(int fd, const void *buf, size_t n, int flags, const struct sockaddr *addr, socklen_t addr_len) {
+	if (!is_localhost(addr, addr_len)) {
 		// Sending to other than localhost not yet implemented
 		return 0;
 	}
 	uint16_t source_port;
-	uint16_t dest_port = get_port(dest_addr, addrlen);
+	uint16_t dest_port = get_port(addr, addr_len);
 	VirtualSocket* dest_vs = nullptr;
 	{
-		const std::lock_guard<std::mutex> lock(mutex);
-		source_port = getvs(sockfd)->sport;
+		VLOCK();
+		source_port = getvs(fd)->sport;
 		auto it = port_map.find(dest_port);
 		if (it != port_map.end()) {
 			dest_vs = it->second;
@@ -170,34 +206,32 @@ ssize_t emsocket_sendto(int sockfd, const void *buf, size_t len, int flags,
 	// Lock destination vs
 	{
 		const std::lock_guard<std::mutex> lock(dest_vs->mutex);
-		dest_vs->recvbuf.emplace_back(source_port, (const char*)buf, len);
+		dest_vs->recvbuf.emplace_back(source_port, (const char*)buf, n);
 	}
 	dest_vs->cv.notify_all();
-	//std::cout << "sockfd=" << sockfd << " Sent packet of size " << len << std::endl;
-	return len;
+	return n;
 }
 
-ssize_t emsocket_recvfrom(int sockfd, void *buf, size_t len, int flags,
-                 struct sockaddr *src_addr, socklen_t *addrlen) {
+ssize_t emsocket_recvfrom(int fd, void *buf, size_t n, int flags, struct sockaddr *addr, socklen_t *addr_len) {
 	VirtualSocket *vs;
 	{
-		const std::lock_guard<std::mutex> lock(mutex);
-		vs = getvs(sockfd);
+		VLOCK();
+		vs = getvs(fd);
 	}
 	// For now, this should never be called in a blocking situation.
 	assert(vs->recvbuf.size() > 0);
 	const std::lock_guard<std::mutex> lock(vs->mutex);
 	const pkt &p = vs->recvbuf.front();
-	ssize_t written = std::min(p.data.size(), len);
+	ssize_t written = std::min(p.data.size(), n);
 	bool truncated = (written != (ssize_t)p.data.size());
 	memcpy(buf, &p.data[0], written);
-	if (src_addr) {
+	if (addr) {
 		struct sockaddr_in ai = {0};
 		ai.sin_family = AF_INET;
 		ai.sin_port = htons(p.source_port);
 		ai.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-		memcpy(src_addr, &ai, std::min((size_t)*addrlen, sizeof(ai)));
-		*addrlen = sizeof(ai);
+		memcpy(addr, &ai, std::min((size_t)*addr_len, sizeof(ai)));
+		*addr_len = sizeof(ai);
 	}
 	vs->recvbuf.pop_front();
 	if (truncated) errno = EMSGSIZE;
@@ -205,19 +239,71 @@ ssize_t emsocket_recvfrom(int sockfd, void *buf, size_t len, int flags,
 	return written;
 }
 
+
+ssize_t emsocket_sendmsg(int fd, const struct msghdr *message, int flags);
+
+int emsocket_sendmmsg(int fd, struct mmsghdr *vmessages, unsigned int vlen, int flags);
+
+ssize_t emsocket_recvmsg(int fd, struct msghdr *message, int flags);
+
+int emsocket_recvmmsg(int fd, struct mmsghdr *vmessages, unsigned int vlen, int flags, struct timespec *tmo);
+
+int emsocket_getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen);
+
+int emsocket_setsockopt(int fd, int level, int optname, const void *optval, socklen_t optlen) {
+	return -1;
+}
+
+int emsocket_listen(int fd, int n);
+
+int emsocket_accept(int fd, struct sockaddr *addr, socklen_t *addr_len);
+
+int emsocket_accept4(int fd, struct sockaddr *addr, socklen_t *addr_len, int flags);
+
+int emsocket_shutdown(int fd, int how);
+
+int emsocket_sockatmark(int fd);
+
+int emsocket_isfdtype(int fd, int fdtype);
+
+int emsocket_getaddrinfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res);
+
+void emsocket_freeaddrinfo(struct addrinfo *res);
+
+const char* emsocket_gai_strerror(int errcode);
+
+struct hostent *emsocket_gethostbyname(const char *name);
+
+struct hostent *emsocket_gethostbyaddr(const void *addr, socklen_t len, int type);
+
+void emsocket_sethostent(int stayopen);
+
+void emsocket_endhostent(void);
+
+void emsocket_herror(const char *s);
+
+const char *emsocket_hstrerror(int err);
+
+struct hostent *emsocket_gethostent(void);
+
+struct hostent *emsocket_gethostbyname2(const char *name, int af);
+
+int emsocket_gethostent_r(struct hostent *ret, char *buf, size_t buflen, struct hostent **result, int *h_errnop);
+
+int emsocket_gethostbyaddr_r(const void *addr, socklen_t len, int type, struct hostent *ret, char *buf, size_t buflen, struct hostent **result, int *h_errnop);
+
+int emsocket_gethostbyname_r(const char *name, struct hostent *ret, char *buf, size_t buflen, struct hostent **result, int *h_errnop);
+
+int emsocket_gethostbyname2_r(const char *name, int af, struct hostent *ret, char *buf, size_t buflen, struct hostent **result, int *h_errnop);
+
 // Cheap hack
 // Only supports select on a single fd
-int emsocket_select(
-		int nfds,
-		fd_set *readfds,
-		fd_set *writefds,
-		fd_set *exceptfds,
-		struct timeval *timeout) {
+int emsocket_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout) {
 	int sockfd = nfds - 1;
 	assert(FD_ISSET(sockfd, readfds));
 	VirtualSocket *vs;
 	{
-		const std::lock_guard<std::mutex> lock(mutex);
+		VLOCK();
 		vs = getvs(sockfd);
 	}
 	std::unique_lock<std::mutex> lock(vs->mutex);
@@ -235,14 +321,40 @@ int emsocket_select(
 	return 1;
 }
 
-int emsocket_close(int sockfd) {
-	const std::lock_guard<std::mutex> lock(mutex);
-	auto vs = getvs(sockfd);
+int emsocket_pselect(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, const struct timespec *timeout, const sigset_t *sigmask);
+
+int emsocket_poll(struct pollfd *fds, nfds_t nfds, int timeout);
+
+int emsocket_ppoll(struct pollfd *fds, nfds_t nfds, const struct timespec *tmo_p, const sigset_t *sigmask);
+
+int emsocket_epoll_create(int);
+
+int emsocket_epoll_create1(int);
+
+int emsocket_epoll_ctl(int, int, int, struct epoll_event *);
+
+int emsocket_epoll_wait(int, struct epoll_event *, int, int);
+
+int emsocket_epoll_pwait(int, struct epoll_event *, int, int, const sigset_t *);
+
+int emsocket_close(int fd) {
+	if (fd < EMSOCKET_BASE_FD) {
+		return ::close(fd);
+	}
+	VLOCK();
+	auto vs = getvs(fd);
 	if (vs->sport) {
 		port_map.erase(vs->sport);
 		vs->sport = 0;
 	}
-	vs->open = false;
-	vs->recvbuf.clear();
+	vs->reset(false);
 	return 0;
+}
+
+int emsocket_fcntl(int fd, int cmd, ...) {
+  abort();
+}
+
+int emsocket_ioctl(int fd, unsigned long request, ...) {
+  abort();
 }
