@@ -37,6 +37,9 @@ SOFTWARE.
 // but it redeclares ioctl(), so it needs to be here.
 #include <stropts.h>
 
+#include <emscripten/threading.h>
+
+// This must match the same defines in VirtualSocket.h
 #define EMSOCKET_BASE_FD   512
 #define EMSOCKET_MAX_FD    1024
 
@@ -118,6 +121,8 @@ extern int emsocket_epoll_wait(int, struct epoll_event *, int, int);
 extern int emsocket_epoll_pwait(int, struct epoll_event *, int, int, const sigset_t *);
 
 /* From unistd.h */
+extern ssize_t emsocket_read(int fd, void *buf, size_t count);
+extern ssize_t emsocket_write(int fd, const void *buf, size_t count);
 extern int emsocket_close(int fd);
 
 /* From fcntl.h */
@@ -177,6 +182,8 @@ extern int emsocket_ioctl(int fd, unsigned long request, ...);
 #define epoll_ctl               emsocket_epoll_ctl
 #define epoll_wait              emsocket_epoll_wait
 #define epoll_pwait             emsocket_epoll_pwait
+#define read                    emsocket_read
+#define write                   emsocket_write
 #define close                   emsocket_close
 
 // Special macros needed to handle __VA_ARGS__ forwarding
