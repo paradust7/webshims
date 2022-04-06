@@ -38,15 +38,15 @@ public:
     }
 
     SocketAddr(const std::string &ip, uint16_t port) {
+        clear();
         setIP(ip);
         setPort(port);
     }
 
     SocketAddr(const struct sockaddr *addr, socklen_t addrlen) {
+        clear();
         if (addr->sa_family == AF_INET && addrlen >= sizeof(sin)) {
             memcpy(&sin, addr, sizeof(sin));
-        } else {
-            clear();
         }
     }
 
@@ -58,6 +58,7 @@ public:
 
     bool setIP(std::string ip) {
         if (1 == inet_pton(AF_INET, ip.c_str(), &(sin.sin_addr))) {
+            sin.sin_family = AF_INET;
             return true; // success
         }
         return false; // fail
@@ -96,9 +97,27 @@ public:
         *addr_len = sizeof(sin);
     }
 
+    bool operator==(const SocketAddr &o) const {
+        return (
+            sin.sin_family == o.sin.sin_family &&
+            sin.sin_port == o.sin.sin_port &&
+            sin.sin_addr.s_addr == o.sin.sin_addr.s_addr);
+    }
+
+    bool operator!=(const SocketAddr &o) const {
+        return !(*this == o);
+    }
+
+    const struct sockaddr* sockaddr_ptr() {
+        return (const struct sockaddr*)&sin;
+    }
+
+    socklen_t sockaddr_len() {
+        return sizeof(sin);
+    }
+
 private:
     sockaddr_in sin;
-    bool valid = true;
 };
 
 static inline std::ostream& operator<<(std::ostream &os, const SocketAddr &addr) {

@@ -28,9 +28,11 @@ SOFTWARE.
 #include <string>
 #include <cassert>
 #include <cstdint>
+#include <mutex>
 #include <memory.h>
 #include <emscripten/websocket.h>
 #include "VirtualSocket.h"
+#include "Packet.h"
 #include "ProxyLink.h"
 #include "emsocketctl.h"
 
@@ -59,6 +61,8 @@ EM_JS(int, setup_proxylink_websocket, (const char* url, void *thisPtr), {
     const index = mywebsockets.length;
     mywebsockets.push(ws);
     ws.binaryType = "arraybuffer";
+    ws.userEnabled = false;
+    ws.userBuffer = [];
     ws.onopen = (e) => {
         w_proxylink_onopen(thisPtr);
     };
@@ -79,10 +83,33 @@ EM_JS(int, setup_proxylink_websocket, (const char* url, void *thisPtr), {
     return index;
 });
 
-EM_JS(void, send_proxylink_websocket, (int index, const void *data, int len), {
+EM_JS(void, send_proxylink_websocket, (int index, int isUser, const void *data, int len), {
+    const ws = mywebsockets[index];
+    const bdata = new Uint8Array(HEAPU8.subarray(data, data + len));
+    if (ws) {
+        if (isUser) {
+            if (ws.userEnabled) {
+                ws.send(bdata);
+            } else {
+                ws.userBuffer.push(bdata);
+            }
+        } else {
+                ws.send(bdata);
+        }
+
+    }
+});
+
+EM_JS(void, enable_user_proxylink_websocket, (int index), {
     const ws = mywebsockets[index];
     if (ws) {
-        ws.send(new Uint8Array(HEAPU8.subarray(data, data + len)));
+        ws.userEnabled = true;
+        if (ws.userBuffer.length > 0) {
+            for (const bdata of ws.userBuffer) {
+                ws.send(bdata);
+            }
+            ws.userBuffer = [];
+        }
     }
 });
 
@@ -94,12 +121,6 @@ EM_JS(void, delete_proxylink_websocket, (int index), {
         ws.close();
     }
 });
-
-static void* memdup(const void *data, size_t len) {
-    void* buf = malloc(len);
-    memcpy(buf, data, len);
-    return buf;
-}
 
 namespace emsocket {
 
@@ -133,12 +154,12 @@ public:
 
     // Called from external thread
     virtual void send(const void *data, size_t len) {
-        // This can be called from another thread. Move it to the I/O thread.
+        // Called from an external thread. Move it to the I/O thread.
         int wsIndex_ = wsIndex;
-        void *dataCopy = memdup(data, len);
-        emsocket_run_on_io_thread(false, [wsIndex_, dataCopy, len]() {
-            send_proxylink_websocket(wsIndex_, dataCopy, len);
-            free(dataCopy);
+        Packet *pkt = new Packet(SocketAddr(), data, len);
+        emsocket_run_on_io_thread(false, [wsIndex_, pkt]() {
+            send_proxylink_websocket(wsIndex_, 1, &pkt->data[0], pkt->data.size());
+            delete pkt;
         });
     }
 
@@ -149,7 +170,7 @@ public:
         // Send a proxy request
         char buf[128];
         sprintf(buf, "PROXY IPV4 %s %s %u", (udp ? "UDP" : "TCP"), addr.getIP().c_str(), addr.getPort());
-        send_proxylink_websocket(wsIndex, buf, strlen(buf));
+        send_proxylink_websocket(wsIndex, 0, buf, strlen(buf));
         //std::cerr << "Sent websocket PROXY handshake" << std::endl;
         sentProxyRequest = true;
     }
@@ -183,6 +204,7 @@ public:
             std::string response((const char*)buf, n);
             if (response == "PROXY OK") {
                 receivedProxyAuth = true;
+                enable_user_proxylink_websocket(wsIndex);
                 vs->linkConnected();
                 return;
             }
@@ -200,12 +222,10 @@ public:
         vs->linkShutdown();
     }
 private:
-    // vs is protected by vs_mutex
     VirtualSocket *vs;
     SocketAddr addr;
     bool udp;
     int wsIndex;
-    //EMSCRIPTEN_WEBSOCKET_T ws;
     bool sentProxyRequest;
     bool receivedProxyAuth;
 };

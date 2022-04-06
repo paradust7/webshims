@@ -23,24 +23,21 @@ SOFTWARE.
 */
 #pragma once
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+#include <vector>
+#include "SocketAddr.h"
 
-void emsocket_init(void);
-void emsocket_set_proxy(const char *proxyUrl);
-const char* emsocket_get_proxy(void);
-
-#ifdef __cplusplus
-}
-#endif
-
-#ifdef EMSOCKET_INTERNAL
-#include <functional>
 namespace emsocket {
 
-// Will be called exactly once in the I/O thread.
-void emsocket_run_on_io_thread(bool sync, std::function<void()> && callback);
+struct Packet {
+    SocketAddr from;
+    std::vector<char> data;
+
+    Packet() = delete;
+    Packet(const Packet &) = delete;
+    Packet& operator=(const Packet &) = delete;
+    Packet(Packet &&p) : from(p.from), data(std::move(p.data)) { }
+    Packet(const SocketAddr &from_, const void *buf, size_t len)
+        : from(from_), data((char*)buf, ((char*)buf) + len) { }
+};
 
 } // namespace
-#endif

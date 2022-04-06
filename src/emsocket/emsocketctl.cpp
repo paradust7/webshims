@@ -46,7 +46,7 @@ using namespace emsocket;
 
 static void *io_thread_main(void *);
 
-void emsocket_init() {
+void emsocket_init(void) {
     if (didInit) return;
     didInit = true;
 
@@ -61,6 +61,11 @@ void emsocket_init() {
 void emsocket_set_proxy(const char *proxyUrl) {
     currentProxyUrl = proxyUrl ? proxyUrl : "";
 }
+
+const char* emsocket_get_proxy(void) {
+    return currentProxyUrl.c_str();
+}
+
 
 static void io_thread_reenter(void) {
     std::vector<std::function<void()> > callbacks;

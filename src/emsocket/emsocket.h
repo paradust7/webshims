@@ -81,7 +81,6 @@ extern int emsocket_isfdtype(int fd, int fdtype);
 
 extern int emsocket_getaddrinfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res);
 extern void emsocket_freeaddrinfo(struct addrinfo *res);
-extern const char* emsocket_gai_strerror(int errcode);
 
 extern struct hostent *emsocket_gethostbyname(const char *name);
 extern struct hostent *emsocket_gethostbyaddr(const void *addr, socklen_t len, int type);
@@ -160,7 +159,6 @@ extern int emsocket_ioctl(int fd, unsigned long request, ...);
 #define isfdtype                emsocket_isfdtype
 #define getaddrinfo             emsocket_getaddrinfo
 #define freeaddrinfo            emsocket_freeaddrinfo
-#define gai_strerror            emsocket_gai_strerror
 #define gethostbyname           emsocket_gethostbyname
 #define gethostbyaddr           emsocket_gethostbyaddr
 #define sethostent              emsocket_sethostent

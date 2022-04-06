@@ -29,6 +29,7 @@ SOFTWARE.
 #include <random>
 #include <cassert>
 #include <emscripten/threading.h>
+#include "emsocketctl.h"
 #include "VirtualSocket.h"
 #include "ProxyLink.h"
 
@@ -175,23 +176,24 @@ void VirtualSocket::waitFor(const std::function<bool(void)>& predicate, int64_t 
     }
 }
 
-bool VirtualSocket::startLocalConnect(uint16_t port) {
-    std::cerr << "emsocket local TCP not yet supported" << std::endl;
-    return false;
-}
-
-bool VirtualSocket::startProxyConnect(const std::string &proxyUrl, const SocketAddr &dest) {
-    assert(!is_udp);
-    assert(!link);
-    assert(!is_connected);
-    assert(!is_shutdown);
-    assert(proxyUrl.size() > 0);
-    if (!isBound()) {
-        bind(SocketAddr()); // bind to random port
+bool VirtualSocket::startConnect(const SocketAddr &dest) {
+    if (dest.isLocalHost()) {
+        std::cerr << "emsocket local TCP not yet supported" << std::endl;
+        return false;
+    } else if (strlen(emsocket_get_proxy()) > 0) {
+        assert(!is_udp);
+        assert(!link);
+        assert(!is_connected);
+        assert(!is_shutdown);
+        if (!isBound()) {
+            bind(SocketAddr()); // bind to random port
+        }
+        remoteAddr = dest;
+        link = make_proxy_link(this, emsocket_get_proxy(), dest, is_udp);
+        return true;
     }
-    remoteAddr = dest;
-    link = make_proxy_link(this, proxyUrl, dest, is_udp);
-    return true;
+    std::cerr << "emsocket no proxy set" << std::endl;
+    return false;
 }
 
 
@@ -261,8 +263,16 @@ void VirtualSocket::sendto(const void *buf, size_t n, const SocketAddr& to) {
         }
         return;
     }
-    // Proxying to external UDP not implemented yet
-    abort();
+    if (link) {
+        if (remoteAddr != to) {
+            std::cerr << "emsocket: Reuse of socket for multiple destinations not supported" << std::endl;
+            return;
+        }
+    } else {
+        remoteAddr = to;
+        link = make_proxy_link(this, emsocket_get_proxy(), to, is_udp);
+    }
+    link->send(buf, n);
 }
 
 } // namespace

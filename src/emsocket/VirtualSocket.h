@@ -30,6 +30,7 @@ SOFTWARE.
 #include <atomic>
 #include "SocketAddr.h"
 #include "Link.h"
+#include "Packet.h"
 
 // This must match the same defines in emsocket.h
 #define EMSOCKET_BASE_FD   512
@@ -37,18 +38,6 @@ SOFTWARE.
 #define EMSOCKET_NSOCKETS  (EMSOCKET_MAX_FD - EMSOCKET_BASE_FD)
 
 namespace emsocket {
-
-struct Packet {
-    SocketAddr from;
-    std::vector<char> data;
-
-    Packet() = delete;
-    Packet(const Packet &) = delete;
-    Packet& operator=(const Packet &) = delete;
-    Packet(Packet &&p) : from(p.from), data(std::move(p.data)) { }
-    Packet(const SocketAddr &from_, const void *buf, size_t len)
-        : from(from_), data((char*)buf, ((char*)buf) + len) { }
-};
 
 class VirtualSocket {
 public:
@@ -76,8 +65,7 @@ public:
     static bool runWithLock(const std::function<bool(void)>& predicate);
     static void waitFor(const std::function<bool(void)>& predicate, int64_t timeout);
 
-    bool startLocalConnect(uint16_t port);
-    bool startProxyConnect(const std::string &proxyUrl, const SocketAddr &dest);
+    bool startConnect(const SocketAddr &dest);
 
     // Stream read/write. Always non-blocking.
     ssize_t read(void *buf, size_t n);

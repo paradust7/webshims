@@ -50,10 +50,6 @@ SOFTWARE.
 
 using namespace emsocket;
 
-namespace emsocket {
-  extern std::string currentProxyUrl;
-}
-
 #if EMSOCKET_DEBUG
 
 std::mutex dbg_mutex;
@@ -143,28 +139,14 @@ int emsocket_connect(int fd, const struct sockaddr *addr, socklen_t len) {
 		errno = EISCONN;
 		return -1;
 	}
-	if (dest.isLocalHost()) {
-		if (!vs->startLocalConnect(dest.getPort())) {
-                        DBG(std::cerr << "emsocket_connect: StartLocalConnect failed" << std::endl;);
-			errno = ECONNREFUSED;
-			return -1;
-		}
-	} else if (currentProxyUrl.size() > 0) {
-		if (!vs->startProxyConnect(currentProxyUrl, dest)) {
-                        DBG(std::cerr << "emsocket_connect: StartProxyConnect failed" << std::endl;);
-			errno = ECONNREFUSED;
-			return -1;
-		}
-	} else {
-                DBG(std::cerr << "emsocket_connect: Unreachable address" << std::endl;);
-		errno = ENETUNREACH;
+        if (!vs->startConnect(dest)) {
+		DBG(std::cerr << "emsocket_connect: startConnect failed" << std::endl;);
+		errno = ECONNREFUSED;
 		return -1;
 	}
-
         if (vs->isConnected() && !vs->isShutdown()) {
             return 0;
         }
-
         if (!vs->canBlock()) {
                 DBG(std::cerr << "emsocket_connect: Connection in progress" << std::endl;);
 		errno = EINPROGRESS;
@@ -364,15 +346,77 @@ int emsocket_sockatmark(int fd);
 int emsocket_isfdtype(int fd, int fdtype);
 
 int emsocket_getaddrinfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res) {
-  /* There's no DNS lookup function in javascript, so it would need to be provided */
-  return EAI_FAIL;
+    DBG(std::cerr << "emsocket_getaddrinfo: node=" << (node ? node : "NULL") << ", service=" << (service ? service : "NULL") << std::endl;);
+    if (service != NULL) {
+        // Not supported.
+        std::cerr << "emsocket_getaddrinfo: service field not supported" << std::endl;
+        return EAI_SERVICE;
+    }
+    if (hints && hints->ai_family != AF_INET) {
+        // Not supported
+        std::cerr << "emsocket_getaddrinfo: only AF_INET supported" << std::endl;
+        return EAI_FAIL;
+    }
+    if (hints && hints->ai_flags != 0) {
+        // Not supported
+        std::cerr << "emsocket_getaddrinfo: ai_flags not supported" << std::endl;
+        return EAI_FAIL;
+    }
+    // Query the proxy
+    int fd = emsocket_socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        std::cerr << "emsocket_getaddrinfo: emsocket_socket failed, errno = " << errno << std::endl;
+        return EAI_SYSTEM;
+    }
+    SocketAddr dnsAddr("10.0.0.1", 53);
+    std::cerr << "CONNECTING TO DNS=" << dnsAddr << std::endl;
+    int rc = emsocket_connect(fd, dnsAddr.sockaddr_ptr(), dnsAddr.sockaddr_len());
+    if (rc != 0) {
+        std::cerr << "emsocket_getaddrinfo: emsocket_connect failed, errno = " << errno << std::endl;
+        emsocket_close(fd);
+        return EAI_SYSTEM;
+    }
+    size_t nodeLen = strlen(node);
+    if (emsocket_send(fd, node, nodeLen, 0) != nodeLen) {
+        std::cerr << "emsocket_getaddrinfo: emsocket_send failed, errno = " << errno << std::endl;
+        return EAI_SYSTEM;
+    }
+    uint32_t addr;
+    if (emsocket_read(fd, &addr, 4) != 4) {
+        std::cerr << "emsocket_getaddrinfo: emsocket_read failed, errno = " << errno << std::endl;
+        return EAI_SYSTEM;
+    }
+    if (addr == 0) {
+        return EAI_FAIL;
+    }
+    if (emsocket_close(fd) != 0) {
+        std::cerr << "emsocket_getaddrinfo: emsocket_close failed, errno = " << errno << std::endl;
+        return EAI_SYSTEM;
+    }
+    struct addrinfo *result = (struct addrinfo*)malloc(sizeof(struct addrinfo));
+    memset(result, 0, sizeof(struct addrinfo));
+    result->ai_family = AF_INET;
+    result->ai_socktype = hints ? hints->ai_socktype : 0;
+    result->ai_protocol = hints ? hints->ai_protocol : 0;
+    result->ai_addrlen = sizeof(sockaddr_in);
+
+    struct sockaddr_in* sin = (struct sockaddr_in*)malloc(sizeof(sockaddr_in));
+    memset(sin, 0, sizeof(sockaddr_in));
+    sin->sin_family = AF_INET;
+    sin->sin_addr.s_addr = addr;
+
+    result->ai_addr = (struct sockaddr*)sin;
+    *res = result;
+    return 0;
 }
 
 void emsocket_freeaddrinfo(struct addrinfo *res) {
-  return;
+    if (res) {
+        free(res->ai_addr);
+        free(res);
+    }
+    return;
 }
-
-const char* emsocket_gai_strerror(int errcode);
 
 struct hostent *emsocket_gethostbyname(const char *name);
 
