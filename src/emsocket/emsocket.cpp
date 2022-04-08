@@ -567,12 +567,14 @@ int emsocket_poll(struct pollfd *fds, nfds_t nfds, int timeout) {
         // Keep waiting until count > 0
         return (count > 0);
     };
-    //if (emscripten_is_main_browser_thread()) {
-    //    //DBG(std::cerr << "emsocket_poll fast exit due to being on main thread" << std::endl;);
-    //    VirtualSocket::runWithLock(predicate);
-    //    return count;
-    //}
-    VirtualSocket::waitFor(predicate, timeout);
+
+    std::vector<VirtualSocket*> vslist;
+    for (int i = 0; i < nfds; i++) {
+        if (fds[i].fd < 0) continue;
+        auto vs = VirtualSocket::get(fds[i].fd);
+        vslist.push_back(vs);
+    }
+    VirtualSocket::waitFor(vslist, predicate, timeout);
     return count;
 }
 

@@ -32,6 +32,7 @@ SOFTWARE.
 #include "emsocketctl.h"
 #include "VirtualSocket.h"
 #include "ProxyLink.h"
+#include "WaitList.h"
 
 namespace emsocket {
 
@@ -48,8 +49,10 @@ static std::mutex vs_mutex;
 static std::condition_variable vs_event;
 VirtualSocket VirtualSocket::sockets[EMSOCKET_NSOCKETS];
 static std::unordered_map<uint16_t, VirtualSocket*> vs_port_map;
+static WaitList<VirtualSocket*> wait_list;
 
-#define VSLOCK()   const std::lock_guard<std::mutex> lock(vs_mutex)
+#define VSLOCK()       const std::lock_guard<std::mutex> lock(vs_mutex)
+#define RECVBUFLOCK()  const std::lock_guard<std::mutex> rblock(recvbufMutex);
 
 static std::random_device rd;
 
@@ -67,18 +70,19 @@ void VirtualSocket::reset() {
     is_blocking = true;
     bindAddr.clear();
     remoteAddr.clear();
-    recvbuf.clear();
     link = nullptr;
+    RECVBUFLOCK();
+    recvbuf.clear();
 }
 
 
 void VirtualSocket::close() {
-    VSLOCK();
-    uint16_t port = bindAddr.getPort();
     if (link) {
         delete link;
         link = nullptr;
     }
+    VSLOCK();
+    uint16_t port = bindAddr.getPort();
     if (port != 0) {
         vs_port_map.erase(port);
     }
@@ -87,20 +91,20 @@ void VirtualSocket::close() {
 
 void VirtualSocket::linkConnected() {
     is_connected = true;
-    vs_event.notify_all();
+    wait_list.notify(this);
 }
 
 void VirtualSocket::linkShutdown() {
     is_shutdown = true;
-    vs_event.notify_all();
+    wait_list.notify(this);
 }
 
 void VirtualSocket::linkReceived(const SocketAddr& addr, const void *buf, size_t n) {
     {
-        VSLOCK();
+        RECVBUFLOCK();
         recvbuf.emplace_back(addr, buf, n);
     }
-    vs_event.notify_all();
+    wait_list.notify(this);
 }
 
 VirtualSocket* VirtualSocket::allocate(bool udp) {
@@ -126,54 +130,53 @@ VirtualSocket* VirtualSocket::get(int fd) {
 
 bool VirtualSocket::bind(const SocketAddr& addr) {
     assert(bindAddr.getPort() == 0);
-    VSLOCK();
-    // TODO: Separate out TCP and UDP ports?
     uint16_t port = addr.getPort();
-    if (port == 0) {
-        std::default_random_engine engine(rd());
-        std::uniform_int_distribution<int> randport(4096, 16384);
-        do {
-            port = randport(engine);
-        } while (vs_port_map.count(port));
-    } else if (vs_port_map.count(port)) {
-        return false;
+    std::default_random_engine engine(rd());
+    std::uniform_int_distribution<int> randport(4096, 16384);
+    {
+        VSLOCK();
+        // TODO: Separate out TCP and UDP ports?
+        if (port == 0) {
+            do {
+                port = randport(engine);
+            } while (vs_port_map.count(port));
+        } else if (vs_port_map.count(port)) {
+            return false;
+        }
+        vs_port_map[port] = this;
+        bindAddr = addr;
+        bindAddr.setPort(port);
     }
-    bindAddr = addr;
-    bindAddr.setPort(port);
-    vs_port_map[port] = this;
     return true;
 }
 
+bool VirtualSocket::hasData() const {
+    RECVBUFLOCK();
+    return !recvbuf.empty();
+}
+
+
 bool VirtualSocket::canBlock() const {
-    // Out of necessity, sockets in the main browser thread will
-    // always act like non-blocking sockets.
-    return is_blocking; // && !emscripten_is_main_browser_thread();
+    return is_blocking;
 }
 
 void VirtualSocket::waitForData() {
-    VirtualSocket::waitFor([&]() {
-        return !recvbuf.empty();
+    VirtualSocket::waitFor({this}, [&]() {
+	return hasData();
     }, -1);
 }
 
 void VirtualSocket::waitForConnect() {
-    VirtualSocket::waitFor([&]() {
+    VirtualSocket::waitFor({this}, [&]() {
         return isConnected() || isShutdown();
     }, -1);
 }
 
-bool VirtualSocket::runWithLock(const std::function<bool(void)>& predicate) {
-    std::unique_lock<std::mutex> lock(vs_mutex);
-    return predicate();
-}
-
-void VirtualSocket::waitFor(const std::function<bool(void)>& predicate, int64_t timeout) {
-    std::unique_lock<std::mutex> lock(vs_mutex);
-    if (timeout < 0) {
-        vs_event.wait(lock, predicate);
-    } else {
-        vs_event.wait_for(lock, std::chrono::milliseconds(timeout), predicate);
-    }
+void VirtualSocket::waitFor(
+        const std::vector<VirtualSocket*> &vslist,
+        const std::function<bool(void)>& predicate,
+        int64_t timeout) {
+    wait_list.waitFor(vslist, predicate, timeout);
 }
 
 bool VirtualSocket::startConnect(const SocketAddr &dest) {
@@ -200,7 +203,7 @@ bool VirtualSocket::startConnect(const SocketAddr &dest) {
 // Stream read/write. Always non-blocking.
 ssize_t VirtualSocket::read(void *buf, size_t n) {
     assert(!is_udp);
-    VSLOCK();
+    RECVBUFLOCK();
     char *cbuf = (char*)buf;
     size_t pos = 0;
     while (!recvbuf.empty() && pos < n) {
@@ -228,15 +231,17 @@ void VirtualSocket::write(const void *buf, size_t n) {
 // Datagram read/write. Always non-blocking
 ssize_t VirtualSocket::recvfrom(void *buf, size_t n, SocketAddr *from) {
     assert(is_udp);
-    VSLOCK();
     char *cbuf = (char*)buf;
-    if (!recvbuf.empty()) {
-        Packet pkt = std::move(recvbuf.front());
-        recvbuf.pop_front();
-        size_t take = std::min(n, pkt.data.size());
-        memcpy(&cbuf[0], &pkt.data[0], take);
-        *from = pkt.from;
-        return take;
+    {
+        RECVBUFLOCK();
+        if (!recvbuf.empty()) {
+            Packet pkt = std::move(recvbuf.front());
+            recvbuf.pop_front();
+            size_t take = std::min(n, pkt.data.size());
+            memcpy(&cbuf[0], &pkt.data[0], take);
+            *from = pkt.from;
+            return take;
+        }
     }
     return 0;
 }
@@ -252,13 +257,11 @@ void VirtualSocket::sendto(const void *buf, size_t n, const SocketAddr& to) {
             uint16_t port = to.getPort();
             auto it = vs_port_map.find(port);
             if (it != vs_port_map.end()) {
-                it->second->recvbuf.emplace_back(sourceAddr, buf, n);
+                it->second->linkReceived(sourceAddr, buf, n);
                 sent = true;
             }
         }
-        if (sent) {
-            vs_event.notify_all();
-        } else {
+        if (!sent) {
             std::cerr << "sendto going nowhere" << std::endl;
         }
         return;

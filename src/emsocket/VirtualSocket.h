@@ -57,13 +57,15 @@ public:
 
     // This should only be called holding the lock
     // (e.g. inside the predicate for waitFor)
-    bool hasData() const { return !recvbuf.empty(); }
+    bool hasData() const;
 
     bool canBlock() const;
     void waitForData();
     void waitForConnect();
-    static bool runWithLock(const std::function<bool(void)>& predicate);
-    static void waitFor(const std::function<bool(void)>& predicate, int64_t timeout);
+    static void waitFor(
+        const std::vector<VirtualSocket*> &waitlist,
+        const std::function<bool(void)>& predicate,
+        int64_t timeout);
 
     bool startConnect(const SocketAddr &dest);
 
@@ -97,8 +99,10 @@ private:
     std::atomic<bool> is_shutdown;
     SocketAddr bindAddr;
     SocketAddr remoteAddr;
-    std::list<Packet> recvbuf;
     Link *link;
+
+    mutable std::mutex recvbufMutex; // only protects recvbuf
+    std::list<Packet> recvbuf;
 
     static VirtualSocket sockets[EMSOCKET_NSOCKETS];
 };
