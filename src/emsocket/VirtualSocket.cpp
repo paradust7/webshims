@@ -162,7 +162,7 @@ bool VirtualSocket::canBlock() const {
 
 void VirtualSocket::waitForData() {
     VirtualSocket::waitFor({this}, [&]() {
-	return hasData();
+	return isShutdown() || hasData();
     }, -1);
 }
 

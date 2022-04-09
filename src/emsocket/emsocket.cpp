@@ -299,7 +299,7 @@ ssize_t emsocket_recvmsg(int fd, struct msghdr *message, int flags);
 int emsocket_recvmmsg(int fd, struct mmsghdr *vmessages, unsigned int vlen, int flags, struct timespec *tmo);
 
 int emsocket_getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen) {
-    std::cerr << "emsocket_getsockopt: level=" << level << ", optname=" << optname << std::endl;
+    DBG(std::cerr << "emsocket_getsockopt: level=" << level << ", optname=" << optname << std::endl;);
     if (level == SOL_SOCKET) {
         if (optname == SO_ERROR) {
             if (optval && optlen && *optlen == sizeof(int)) {
@@ -325,7 +325,7 @@ int emsocket_getsockopt(int fd, int level, int optname, void *optval, socklen_t 
 }
 
 int emsocket_setsockopt(int fd, int level, int optname, const void *optval, socklen_t optlen) {
-    std::cerr << "emsocket_setsockopt: level=" << level << ", optname=" << optname << std::endl;
+    DBG(std::cerr << "emsocket_setsockopt: level=" << level << ", optname=" << optname << std::endl;);
     return -1;
 }
 
@@ -369,7 +369,7 @@ int emsocket_getaddrinfo(const char *node, const char *service, const struct add
         return EAI_SYSTEM;
     }
     SocketAddr dnsAddr("10.0.0.1", 53);
-    std::cerr << "CONNECTING TO DNS=" << dnsAddr << std::endl;
+    DBG(std::cerr << "CONNECTING TO DNS=" << dnsAddr << std::endl;);
     int rc = emsocket_connect(fd, dnsAddr.sockaddr_ptr(), dnsAddr.sockaddr_len());
     if (rc != 0) {
         std::cerr << "emsocket_getaddrinfo: emsocket_connect failed, errno = " << errno << std::endl;
