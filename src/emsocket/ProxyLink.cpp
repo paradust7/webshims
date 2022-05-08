@@ -48,100 +48,62 @@ extern "C" {
     void proxylink_onmessage(void *thisPtr, const void *buf, size_t n);
 }
 
-EM_JS(int, setup_proxylink_websocket, (const char* url, void *thisPtr), {
-    if (!self.hasOwnProperty('mywebsockets')) {
-        self.mywebsockets = [null];
+EM_JS(int, proxylink_new, (const char* ip, uint16_t port, bool udp, void *thisPtr), {
+    if (!self.hasOwnProperty('w_proxylink_onopen')) {
         self.w_proxylink_onopen = Module.cwrap('proxylink_onopen', null, ['number']);
         self.w_proxylink_onerror = Module.cwrap('proxylink_onerror', null, ['number']);
         self.w_proxylink_onclose = Module.cwrap('proxylink_onclose', null, ['number']);
         self.w_proxylink_onmessage = Module.cwrap('proxylink_onmessage', null, ['number', 'number', 'number']);
     }
 
-    const ws = new WebSocket(UTF8ToString(url));
-    const index = mywebsockets.length;
-    mywebsockets.push(ws);
-    ws.binaryType = "arraybuffer";
-    ws.userEnabled = false;
-    ws.userBuffer = [];
-    ws.onopen = (e) => {
-        w_proxylink_onopen(thisPtr);
-    };
-    ws.onerror = (e) => {
-        w_proxylink_onerror(thisPtr);
-    };
-    ws.onclose = (e) => {
-        w_proxylink_onclose(thisPtr);
-    };
-    ws.onmessage = (e) => {
-        var len = e.data.byteLength;
+    const link = new ProxyLink(UTF8ToString(ip), port, udp);
+    link.onopen = () => { w_proxylink_onopen(thisPtr); };
+    link.onerror = () => { w_proxylink_onerror(thisPtr); };
+    link.onclose = () => { w_proxylink_onclose(thisPtr); };
+    link.onmessage = (data) => {
+        var len = data.byteLength;
+        // TODO: Get rid of this allocation
         var buf = _malloc(len);
-        HEAPU8.set(new Uint8Array(e.data), buf);
+        HEAPU8.set(new Uint8Array(data), buf);
         w_proxylink_onmessage(thisPtr, buf, len);
         _free(buf);
     };
-
-    return index;
+    return link.index;
 });
 
-EM_JS(void, send_proxylink_websocket, (int index, int isUser, const void *data, int len), {
-    const ws = mywebsockets[index];
-    const bdata = new Uint8Array(HEAPU8.subarray(data, data + len));
-    if (ws) {
-        if (isUser) {
-            if (ws.userEnabled) {
-                ws.send(bdata);
-            } else {
-                ws.userBuffer.push(bdata);
-            }
-        } else {
-                ws.send(bdata);
-        }
-
+EM_JS(void, proxylink_send, (int index, const void *data, int len), {
+    const link = ProxyLink.get(index);
+    if (link) {
+        link.send(HEAPU8.subarray(data, data + len));
     }
 });
 
-EM_JS(void, enable_user_proxylink_websocket, (int index), {
-    const ws = mywebsockets[index];
-    if (ws) {
-        ws.userEnabled = true;
-        if (ws.userBuffer.length > 0) {
-            for (const bdata of ws.userBuffer) {
-                ws.send(bdata);
-            }
-            ws.userBuffer = [];
-        }
-    }
-});
-
-EM_JS(void, delete_proxylink_websocket, (int index), {
-    const ws = mywebsockets[index];
-    if (ws) {
-        delete mywebsockets[index];
-        ws.onopen = ws.onerror = ws.onclose = ws.onmessage = null;
-        ws.close();
+EM_JS(void, proxylink_close, (int index), {
+    const link = ProxyLink.get(index);
+    if (link) {
+        link.close();
     }
 });
 
 namespace emsocket {
 
+/*
+ * Wrapper around the javascript class of the same name
+ */
 class ProxyLink : public Link {
 public:
     ProxyLink() = delete;
     ProxyLink(const ProxyLink &) = delete;
     ProxyLink& operator=(const ProxyLink &) = delete;
 
-    ProxyLink(VirtualSocket *vs_, const std::string &proxyUrl, const SocketAddr &addr_, bool udp_)
-        : wsIndex(-1),
-          vs(vs_),
+    ProxyLink(VirtualSocket *vs_, const SocketAddr &addr_, bool udp_)
+        : vs(vs_),
           addr(addr_),
           udp(udp_),
-          sentProxyRequest(false),
-          receivedProxyAuth(false)
+          wsIndex(-1)
     {
-
-        //std::cerr << "Initialized proxy websocket" << std::endl;
-        emsocket_run_on_io_thread(true, [this, proxyUrl]() {
-            wsIndex = setup_proxylink_websocket(proxyUrl.c_str(), this);
+        emsocket_run_on_io_thread(true, [this]() {
+            wsIndex = proxylink_new(addr.getIP().c_str(), addr.getPort(), udp, this);
         });
         assert(wsIndex > 0);
     }
@@ -158,7 +120,7 @@ public:
         int wsIndex_ = wsIndex;
         Packet *pkt = new Packet(SocketAddr(), data, len);
         emsocket_run_on_io_thread(false, [wsIndex_, pkt]() {
-            send_proxylink_websocket(wsIndex_, 1, &pkt->data[0], pkt->data.size());
+            proxylink_send(wsIndex_, &pkt->data[0], pkt->data.size());
             delete pkt;
         });
     }
@@ -167,58 +129,27 @@ public:
 
     // Called from I/O thread
     void onopen() {
-        // Send a proxy request
-        char buf[128];
-        sprintf(buf, "PROXY IPV4 %s %s %u", (udp ? "UDP" : "TCP"), addr.getIP().c_str(), addr.getPort());
-        send_proxylink_websocket(wsIndex, 0, buf, strlen(buf));
-        //std::cerr << "Sent websocket PROXY handshake" << std::endl;
-        sentProxyRequest = true;
+	vs->linkConnected();
     }
 
     // Called from I/O thread
     void onerror() {
-        //std::cerr << "ProxyLink got websocket error" << std::endl;
         hangup();
     }
 
     // Called from I/O thread
     void onclose() {
-        //std::cerr << "ProxyLink got websocket close" << std::endl;
         hangup();
     }
 
     // Called from I/O thread
     void onmessage(const void *buf, int n) {
-        if (!sentProxyRequest) {
-            //std::cerr << "ProxyLink got invalid message before proxy request" << std::endl;
-            hangup();
-            return;
-        }
-        if (!receivedProxyAuth) {
-            // Check for proxy auth
-            if (n > 16) {
-                //std::cerr << "ProxyLink unexpected auth message length (" << n << ")" << std::endl;
-                hangup();
-                return;
-            }
-            std::string response((const char*)buf, n);
-            if (response == "PROXY OK") {
-                receivedProxyAuth = true;
-                enable_user_proxylink_websocket(wsIndex);
-                vs->linkConnected();
-                return;
-            }
-            //std::cerr << "ProxyLink received bad auth: '" << response << "' of length " << n << std::endl;
-            hangup();
-            return;
-        }
-        // Regular message
         vs->linkReceived(addr, buf, n);
     }
 
     // Called from I/O thread
     void hangup() {
-        delete_proxylink_websocket(wsIndex);
+        proxylink_close(wsIndex);
         vs->linkShutdown();
     }
 private:
@@ -226,12 +157,10 @@ private:
     SocketAddr addr;
     bool udp;
     int wsIndex;
-    bool sentProxyRequest;
-    bool receivedProxyAuth;
 };
 
-Link* make_proxy_link(VirtualSocket* vs, const std::string &proxyUrl, const SocketAddr &addr, bool udp) {
-    return new ProxyLink(vs, proxyUrl, addr, udp);
+Link* make_proxy_link(VirtualSocket* vs, const SocketAddr &addr, bool udp) {
+    return new ProxyLink(vs, addr, udp);
 }
 
 } // namespace

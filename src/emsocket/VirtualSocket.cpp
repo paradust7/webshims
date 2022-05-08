@@ -183,7 +183,7 @@ bool VirtualSocket::startConnect(const SocketAddr &dest) {
     if (dest.isLocalHost()) {
         std::cerr << "emsocket local TCP not yet supported" << std::endl;
         return false;
-    } else if (strlen(emsocket_get_proxy()) > 0) {
+    } else {
         assert(!is_udp);
         assert(!link);
         assert(!is_connected);
@@ -192,7 +192,7 @@ bool VirtualSocket::startConnect(const SocketAddr &dest) {
             bind(SocketAddr()); // bind to random port
         }
         remoteAddr = dest;
-        link = make_proxy_link(this, emsocket_get_proxy(), dest, is_udp);
+        link = make_proxy_link(this, dest, is_udp);
         return true;
     }
     std::cerr << "emsocket no proxy set" << std::endl;
@@ -273,7 +273,7 @@ void VirtualSocket::sendto(const void *buf, size_t n, const SocketAddr& to) {
         }
     } else {
         remoteAddr = to;
-        link = make_proxy_link(this, emsocket_get_proxy(), to, is_udp);
+        link = make_proxy_link(this, to, is_udp);
     }
     link->send(buf, n);
 }

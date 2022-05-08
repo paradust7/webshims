@@ -31,9 +31,9 @@ SOFTWARE.
 #include <condition_variable>
 #include <pthread.h>
 #include <emscripten.h>
+#include "proxyjs.gen.h"
 
 namespace emsocket {
-    std::string currentProxyUrl;
     bool didInit;
     pthread_t ioThread;
     std::mutex ioMutex;
@@ -58,12 +58,16 @@ void emsocket_init(void) {
     }
 }
 
-void emsocket_set_proxy(const char *proxyUrl) {
-    currentProxyUrl = proxyUrl ? proxyUrl : "";
-}
+EM_JS(void, _set_proxy, (const char *url), {
+    setProxy(UTF8ToString(url));
+});
 
-const char* emsocket_get_proxy(void) {
-    return currentProxyUrl.c_str();
+void emsocket_set_proxy(const char *url) {
+    char *urlcopy = strdup(url);
+    emsocket_run_on_io_thread(false, [urlcopy]() {
+        _set_proxy(urlcopy);
+        free(urlcopy);
+    });
 }
 
 
@@ -82,6 +86,10 @@ static void io_thread_reenter(void) {
 }
 
 static void *io_thread_main(void *) {
+    init_proxyjs();
+    // TODO: emsocket_run_on_io_thread should use a WebWorker
+    // message to wakeup the I/O thread instead of polling
+    // every 10ms.
     emscripten_set_main_loop(io_thread_reenter, 100, EM_TRUE);
     abort(); // unreachable
 }

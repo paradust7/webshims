@@ -50,6 +50,14 @@ public:
         }
     }
 
+    bool isIPv4() const {
+        return true; // Only one supported at the moment
+    }
+
+    bool isIPv6() const {
+        return false;
+    }
+
     std::string getIP() const {
         char buf[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &(sin.sin_addr), buf, sizeof(buf));

@@ -29,7 +29,6 @@ extern "C" {
 
 void emsocket_init(void);
 void emsocket_set_proxy(const char *proxyUrl);
-const char* emsocket_get_proxy(void);
 
 #ifdef __cplusplus
 }
