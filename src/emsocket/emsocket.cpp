@@ -345,6 +345,35 @@ int emsocket_sockatmark(int fd);
 
 int emsocket_isfdtype(int fd, int fdtype);
 
+static void _proxy_dns_query(const char *name, uint32_t *addr) {
+    *addr = 0;
+    SocketAddr dnsAddr("10.0.0.1", 53);
+    size_t namelen = strlen(name);
+    int fd = emsocket_socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        std::cerr << "emsocket_getaddrinfo: emsocket_socket failed, errno = " << errno << std::endl;
+        goto cleanup;
+    }
+    DBG(std::cerr << "CONNECTING TO DNS=" << dnsAddr << std::endl;);
+    if (emsocket_connect(fd, dnsAddr.sockaddr_ptr(), dnsAddr.sockaddr_len()) != 0) {
+        std::cerr << "emsocket_getaddrinfo: emsocket_connect failed, errno = " << errno << std::endl;
+        goto cleanup;
+    }
+    if (emsocket_send(fd, name, namelen, 0) != namelen) {
+        std::cerr << "emsocket_getaddrinfo: emsocket_send failed, errno = " << errno << std::endl;
+        goto cleanup;
+    }
+    if (emsocket_read(fd, addr, 4) != 4) {
+        std::cerr << "emsocket_getaddrinfo: emsocket_read failed, errno = " << errno << std::endl;
+        goto cleanup;
+    }
+cleanup:
+    if (fd >= 0 && emsocket_close(fd) != 0) {
+        std::cerr << "emsocket_getaddrinfo: emsocket_close failed, errno = " << errno << std::endl;
+
+    }
+}
+
 int emsocket_getaddrinfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res) {
     DBG(std::cerr << "emsocket_getaddrinfo: node=" << (node ? node : "NULL") << ", service=" << (service ? service : "NULL") << std::endl;);
     if (service != NULL) {
@@ -360,39 +389,22 @@ int emsocket_getaddrinfo(const char *node, const char *service, const struct add
     if (hints && hints->ai_flags != 0) {
         // Not supported
         std::cerr << "emsocket_getaddrinfo: ai_flags not supported" << std::endl;
-        return EAI_FAIL;
+        return EAI_BADFLAGS;
     }
-    // Query the proxy
-    int fd = emsocket_socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
-        std::cerr << "emsocket_getaddrinfo: emsocket_socket failed, errno = " << errno << std::endl;
-        return EAI_SYSTEM;
+
+    uint32_t addr = 0;
+    // Check for IPv4 address
+    SocketAddr simpleAddr;
+    if (simpleAddr.setIP(node)) {
+        addr = simpleAddr.addr32();
+    } else {
+        _proxy_dns_query(node, &addr);
     }
-    SocketAddr dnsAddr("10.0.0.1", 53);
-    DBG(std::cerr << "CONNECTING TO DNS=" << dnsAddr << std::endl;);
-    int rc = emsocket_connect(fd, dnsAddr.sockaddr_ptr(), dnsAddr.sockaddr_len());
-    if (rc != 0) {
-        std::cerr << "emsocket_getaddrinfo: emsocket_connect failed, errno = " << errno << std::endl;
-        emsocket_close(fd);
-        return EAI_SYSTEM;
-    }
-    size_t nodeLen = strlen(node);
-    if (emsocket_send(fd, node, nodeLen, 0) != nodeLen) {
-        std::cerr << "emsocket_getaddrinfo: emsocket_send failed, errno = " << errno << std::endl;
-        return EAI_SYSTEM;
-    }
-    uint32_t addr;
-    if (emsocket_read(fd, &addr, 4) != 4) {
-        std::cerr << "emsocket_getaddrinfo: emsocket_read failed, errno = " << errno << std::endl;
-        return EAI_SYSTEM;
-    }
+
     if (addr == 0) {
-        return EAI_FAIL;
+        return EAI_AGAIN;
     }
-    if (emsocket_close(fd) != 0) {
-        std::cerr << "emsocket_getaddrinfo: emsocket_close failed, errno = " << errno << std::endl;
-        return EAI_SYSTEM;
-    }
+
     struct addrinfo *result = (struct addrinfo*)malloc(sizeof(struct addrinfo));
     memset(result, 0, sizeof(struct addrinfo));
     result->ai_family = AF_INET;

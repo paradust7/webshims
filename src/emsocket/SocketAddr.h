@@ -124,6 +124,11 @@ public:
         return sizeof(sin);
     }
 
+    uint32_t addr32() const {
+        assert(sin.sin_family == AF_INET);
+        return sin.sin_addr.s_addr;
+    }
+
 private:
     sockaddr_in sin;
 };
