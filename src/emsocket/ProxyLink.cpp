@@ -45,31 +45,50 @@ extern "C" {
     EMSCRIPTEN_KEEPALIVE
     void proxylink_onclose(void *thisPtr);
     EMSCRIPTEN_KEEPALIVE
-    void proxylink_onmessage(void *thisPtr, const void *buf, size_t n);
+    void proxylink_onmessage(void *thisPtr, const void *buf, size_t n, const char *ip, uint16_t port);
 }
 
-EM_JS(int, proxylink_new, (const char* ip, uint16_t port, bool udp, void *thisPtr), {
+EM_JS(int, proxylink_new, (uint16_t bind_port, bool udp, void *thisPtr), {
     if (!self.hasOwnProperty('w_proxylink_onopen')) {
         self.w_proxylink_onopen = Module.cwrap('proxylink_onopen', null, ['number']);
         self.w_proxylink_onerror = Module.cwrap('proxylink_onerror', null, ['number']);
         self.w_proxylink_onclose = Module.cwrap('proxylink_onclose', null, ['number']);
-        self.w_proxylink_onmessage = Module.cwrap('proxylink_onmessage', null, ['number', 'number', 'number']);
+        self.w_proxylink_onmessage = Module.cwrap('proxylink_onmessage', null, ['number', 'number', 'number', 'number', 'number']);
     }
 
-    const link = new ProxyLink(UTF8ToString(ip), port, udp);
+    const link = new ProxyLink(bind_port, udp);
     link.onopen = () => { w_proxylink_onopen(thisPtr); };
     link.onerror = () => { w_proxylink_onerror(thisPtr); };
     link.onclose = () => { w_proxylink_onclose(thisPtr); };
-    link.onmessage = (data) => {
+    link.onmessage = (data, ip, port) => {
         var len = data.byteLength;
-        // TODO: Get rid of this allocation
+        // TODO: Get rid of these allocations
         var buf = _malloc(len);
         HEAPU8.set(new Uint8Array(data), buf);
-        w_proxylink_onmessage(thisPtr, buf, len);
+        var ip_length = lengthBytesUTF8(ip) + 1;
+        var ip_buf = _malloc(ip_length);
+        stringToUTF8(ip, ip_buf, ip_length);
+        w_proxylink_onmessage(thisPtr, buf, len, ip_buf, port);
         _free(buf);
+        _free(ip_buf);
     };
     return link.index;
 });
+
+EM_JS(void, proxylink_connect, (int index, const char* ip, uint16_t port), {
+    const link = ProxyLink.get(index);
+    if (link) {
+        link.connect(UTF8ToString(ip), port);
+    }
+});
+
+EM_JS(void, proxylink_sendto, (int index, const void *data, int len, const char *dest_ip, uint16_t dest_port), {
+    const link = ProxyLink.get(index);
+    if (link) {
+        link.sendto(HEAPU8.subarray(data, data + len), UTF8ToString(dest_ip), dest_port);
+    }
+});
+
 
 EM_JS(void, proxylink_send, (int index, const void *data, int len), {
     const link = ProxyLink.get(index);
@@ -96,14 +115,14 @@ public:
     ProxyLink(const ProxyLink &) = delete;
     ProxyLink& operator=(const ProxyLink &) = delete;
 
-    ProxyLink(VirtualSocket *vs_, const SocketAddr &addr_, bool udp_)
+    ProxyLink(VirtualSocket *vs_, uint16_t bind_port_, bool udp_)
         : vs(vs_),
-          addr(addr_),
+          bind_port(bind_port_),
           udp(udp_),
           wsIndex(-1)
     {
         emsocket_run_on_io_thread(true, [this]() {
-            wsIndex = proxylink_new(addr.getIP().c_str(), addr.getPort(), udp, this);
+            wsIndex = proxylink_new(bind_port, udp, this);
         });
         assert(wsIndex > 0);
     }
@@ -115,8 +134,28 @@ public:
     }
 
     // Called from external thread
+    virtual void connect(const SocketAddr &addr) {
+        // Move to I/O thread.
+        int wsIndex_ = wsIndex;
+        emsocket_run_on_io_thread(false, [wsIndex_, addr]() {
+            proxylink_connect(wsIndex_, addr.getIP().c_str(), addr.getPort());
+        });
+    }
+
+    // Called from external thread
+    virtual void sendto(const void *data, size_t len, const SocketAddr &addr) {
+        // Move to I/O thread.
+        int wsIndex_ = wsIndex;
+        Packet *pkt = new Packet(SocketAddr(), data, len);
+        emsocket_run_on_io_thread(false, [wsIndex_, pkt, addr]() {
+            proxylink_sendto(wsIndex_, &pkt->data[0], pkt->data.size(), addr.getIP().c_str(), addr.getPort());
+            delete pkt;
+        });
+    }
+
+    // Called from external thread
     virtual void send(const void *data, size_t len) {
-        // Called from an external thread. Move it to the I/O thread.
+        // Move to I/O thread.
         int wsIndex_ = wsIndex;
         Packet *pkt = new Packet(SocketAddr(), data, len);
         emsocket_run_on_io_thread(false, [wsIndex_, pkt]() {
@@ -143,7 +182,8 @@ public:
     }
 
     // Called from I/O thread
-    void onmessage(const void *buf, int n) {
+    void onmessage(const void *buf, int n, const char *ip, uint16_t port) {
+        SocketAddr addr(ip, port);
         vs->linkReceived(addr, buf, n);
     }
 
@@ -154,13 +194,13 @@ public:
     }
 private:
     VirtualSocket *vs;
-    SocketAddr addr;
+    uint16_t bind_port;
     bool udp;
     int wsIndex;
 };
 
-Link* make_proxy_link(VirtualSocket* vs, const SocketAddr &addr, bool udp) {
-    return new ProxyLink(vs, addr, udp);
+Link* make_proxy_link(VirtualSocket* vs, uint16_t bindport, bool udp) {
+    return new ProxyLink(vs, bindport, udp);
 }
 
 } // namespace
@@ -183,6 +223,6 @@ void proxylink_onclose(void *thisPtr) {
 }
 
 EMSCRIPTEN_KEEPALIVE
-void proxylink_onmessage(void *thisPtr, const void *buf, size_t n) {
-    return reinterpret_cast<ProxyLink*>(thisPtr)->onmessage(buf, n);
+void proxylink_onmessage(void *thisPtr, const void *buf, size_t n, const char *ip, uint16_t port) {
+    return reinterpret_cast<ProxyLink*>(thisPtr)->onmessage(buf, n, ip, port);
 }

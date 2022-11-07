@@ -147,6 +147,7 @@ bool VirtualSocket::bind(const SocketAddr& addr) {
         bindAddr = addr;
         bindAddr.setPort(port);
     }
+    link = make_proxy_link(this, port, is_udp);
     return true;
 }
 
@@ -185,14 +186,13 @@ bool VirtualSocket::startConnect(const SocketAddr &dest) {
         return false;
     } else {
         assert(!is_udp);
-        assert(!link);
         assert(!is_connected);
         assert(!is_shutdown);
         if (!isBound()) {
             bind(SocketAddr()); // bind to random port
         }
         remoteAddr = dest;
-        link = make_proxy_link(this, dest, is_udp);
+        link->connect(dest);
         return true;
     }
     std::cerr << "emsocket no proxy set" << std::endl;
@@ -249,8 +249,8 @@ ssize_t VirtualSocket::recvfrom(void *buf, size_t n, SocketAddr *from) {
 void VirtualSocket::sendto(const void *buf, size_t n, const SocketAddr& to) {
     assert(is_udp);
     assert(isBound());
-    SocketAddr sourceAddr("127.0.0.1", bindAddr.getPort());
     if (to.isLocalHost()) {
+        SocketAddr sourceAddr("127.0.0.1", bindAddr.getPort());
         bool sent = false;
         {
             VSLOCK();
@@ -266,16 +266,7 @@ void VirtualSocket::sendto(const void *buf, size_t n, const SocketAddr& to) {
         }
         return;
     }
-    if (link) {
-        if (remoteAddr != to) {
-            std::cerr << "emsocket: Reuse of socket for multiple destinations not supported" << std::endl;
-            return;
-        }
-    } else {
-        remoteAddr = to;
-        link = make_proxy_link(this, to, is_udp);
-    }
-    link->send(buf, n);
+    link->sendto(buf, n, to);
 }
 
 } // namespace

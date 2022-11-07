@@ -46,6 +46,8 @@ using namespace emsocket;
 
 static void *io_thread_main(void *);
 
+EMSCRIPTEN_KEEPALIVE
+extern "C"
 void emsocket_init(void) {
     if (didInit) return;
     didInit = true;
@@ -62,6 +64,8 @@ EM_JS(void, _set_proxy, (const char *url), {
     setProxy(UTF8ToString(url));
 });
 
+EMSCRIPTEN_KEEPALIVE
+extern "C"
 void emsocket_set_proxy(const char *url) {
     char *urlcopy = strdup(url);
     emsocket_run_on_io_thread(false, [urlcopy]() {
@@ -70,6 +74,19 @@ void emsocket_set_proxy(const char *url) {
     });
 }
 
+EM_JS(void, _set_vpn, (const char *vpn), {
+    setVPN(UTF8ToString(vpn));
+});
+
+EMSCRIPTEN_KEEPALIVE
+extern "C"
+void emsocket_set_vpn(const char *vpn) {
+    char *vpncopy = strdup(vpn);
+    emsocket_run_on_io_thread(false, [vpncopy]() {
+        _set_vpn(vpncopy);
+        free(vpncopy);
+    });
+}
 
 static void io_thread_reenter(void) {
     std::vector<std::function<void()> > callbacks;

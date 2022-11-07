@@ -32,6 +32,9 @@ public:
     using Receiver = std::function<void(const void *, size_t)>;
 
     virtual ~Link() { }
+
+    virtual void connect(const SocketAddr &addr) = 0;
+    virtual void sendto(const void *data, size_t len, const SocketAddr &addr) = 0;
     virtual void send(const void *data, size_t len) = 0;
 };
 

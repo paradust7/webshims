@@ -30,6 +30,6 @@ namespace emsocket {
 
 class VirtualSocket;
 
-Link* make_proxy_link(VirtualSocket* vs, const SocketAddr &addr, bool udp);
+Link* make_proxy_link(VirtualSocket* vs, uint16_t bindport, bool udp);
 
 } // namespace

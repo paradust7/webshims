@@ -28,7 +28,8 @@ extern "C" {
 #endif
 
 void emsocket_init(void);
-void emsocket_set_proxy(const char *proxyUrl);
+void emsocket_set_proxy(const char *url);
+void emsocket_set_vpn(const char *vpn);
 
 #ifdef __cplusplus
 }
