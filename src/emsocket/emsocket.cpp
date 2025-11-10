@@ -386,7 +386,8 @@ int emsocket_getaddrinfo(const char *node, const char *service, const struct add
         std::cerr << "emsocket_getaddrinfo: only AF_INET supported" << std::endl;
         return EAI_FAIL;
     }
-    if (hints && hints->ai_flags != 0) {
+    int accepted_flags = AI_ADDRCONFIG;
+    if (hints && (hints->ai_flags & accepted_flags) != hints->ai_flags) {
         // Not supported
         std::cerr << "emsocket_getaddrinfo: ai_flags not supported" << std::endl;
         return EAI_BADFLAGS;
